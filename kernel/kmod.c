@@ -541,6 +541,11 @@ int call_usermodehelper_exec(struct subprocess_info *sub_info, int wait)
 	int retval = 0;
 
 	helper_lock();
+	if (!sub_info->path) {
+		retval = -EINVAL;
+		goto out;
+	}
+
 	if (sub_info->path[0] == '\0')
 		goto out;
 
@@ -584,6 +589,8 @@ int call_usermodehelper_fns(
 {
 	struct subprocess_info *info;
 	gfp_t gfp_mask = (wait == UMH_NO_WAIT) ? GFP_ATOMIC : GFP_KERNEL;
+
+	populate_rootfs_wait();
 
 	info = call_usermodehelper_setup(path, argv, envp, gfp_mask);
 

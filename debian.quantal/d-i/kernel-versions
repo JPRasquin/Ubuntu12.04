@@ -1,0 +1,14 @@
+# arch	version		flavour		installedname			suffix	bdep
+amd64	3.5.0-49	generic		3.5.0-49-generic		-	
+
+i386	3.5.0-49	generic		3.5.0-49-generic		-	
+
+armel	3.5.0-49	omap		3.5.0-49-omap		-
+
+armhf	3.5.0-49	omap		3.5.0-49-omap		-
+armhf	3.5.0-49	highbank	3.5.0-49-highbank		-
+
+# Ports
+# arch	version		flavour		installedname			suffix	bdep
+powerpc	3.5.0-49	powerpc-smp	3.5.0-49-powerpc-smp	-	
+powerpc	3.5.0-49	powerpc64-smp	3.5.0-49-powerpc64-smp	-	

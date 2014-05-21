@@ -776,9 +776,23 @@ int iwlagn_mac_sta_state(struct ieee80211_hw *hw,
 	mutex_lock(&priv->mutex);
 	if (vif->type == NL80211_IFTYPE_STATION) {
 		if (old_state == IEEE80211_STA_NOTEXIST &&
-		    new_state == IEEE80211_STA_NONE)
+		    new_state == IEEE80211_STA_NONE) {
+			/*
+			 * Firmware bug - it'll crash if the beacon interval is less
+			 * than 16. We can't avoid connecting at all, so refuse the
+			 * station state change, this will cause mac80211 to abandon
+			 * attempts to connect to this AP, and eventually wpa_s will
+			 * blacklist the AP...
+			 */
+			if (vif->bss_conf.beacon_int < 16) {
+				IWL_ERR(priv,
+					"AP %pM beacon interval is %d, refusing due to firmware bug!\n",
+					sta->addr, vif->bss_conf.beacon_int);
+				ret = -EINVAL;
+				goto out_unlock;
+			}
 			op = ADD;
-		else if (old_state == IEEE80211_STA_NONE &&
+		} else if (old_state == IEEE80211_STA_NONE &&
 			 new_state == IEEE80211_STA_NOTEXIST)
 			op = REMOVE;
 		else if (old_state == IEEE80211_STA_AUTH &&
@@ -846,6 +860,7 @@ int iwlagn_mac_sta_state(struct ieee80211_hw *hw,
 	if (iwl_is_rfkill(priv))
 		ret = 0;
 
+out_unlock:
 	mutex_unlock(&priv->mutex);
 	IWL_DEBUG_MAC80211(priv, "leave\n");
 
@@ -943,7 +958,10 @@ void iwl_chswitch_done(struct iwl_priv *priv, bool is_success)
 	if (test_bit(STATUS_EXIT_PENDING, &priv->status))
 		return;
 
-	if (test_and_clear_bit(STATUS_CHANNEL_SWITCH_PENDING, &priv->status))
+	if (!test_and_clear_bit(STATUS_CHANNEL_SWITCH_PENDING, &priv->status))
+		return;
+
+	if (ctx->vif)
 		ieee80211_chswitch_done(ctx->vif, is_success);
 }
 
@@ -1342,6 +1360,20 @@ static int iwlagn_mac_add_interface(struct ieee80211_hw *hw,
 
 	vif_priv->ctx = ctx;
 	ctx->vif = vif;
+
+	/*
+	 * In SNIFFER device type, the firmware reports the FCS to
+	 * the host, rather than snipping it off. Unfortunately,
+	 * mac80211 doesn't (yet) provide a per-packet flag for
+	 * this, so that we have to set the hardware flag based
+	 * on the interfaces added. As the monitor interface can
+	 * only be present by itself, and will be removed before
+	 * other interfaces are added, this is safe.
+	 */
+	if (vif->type == NL80211_IFTYPE_MONITOR)
+		priv->hw->flags |= IEEE80211_HW_RX_INCLUDES_FCS;
+	else
+		priv->hw->flags &= ~IEEE80211_HW_RX_INCLUDES_FCS;
 
 	err = iwl_setup_interface(priv, ctx);
 	if (!err || reset)

@@ -994,12 +994,8 @@ void ieee80211_recalc_ps(struct ieee80211_local *local, s32 latency)
 		if (beaconint_us > latency) {
 			local->ps_sdata = NULL;
 		} else {
-			struct ieee80211_bss *bss;
 			int maxslp = 1;
-			u8 dtimper;
-
-			bss = (void *)found->u.mgd.associated->priv;
-			dtimper = bss->dtim_period;
+			u8 dtimper = found->u.mgd.dtim_period;
 
 			/* If the TIM IE is invalid, pretend the value is 1 */
 			if (!dtimper)
@@ -1284,11 +1280,6 @@ static void ieee80211_set_associated(struct ieee80211_sub_if_data *sdata,
 	struct ieee80211_bss_conf *bss_conf = &sdata->vif.bss_conf;
 
 	bss_info_changed |= BSS_CHANGED_ASSOC;
-	/* set timing information */
-	bss_conf->beacon_int = cbss->beacon_interval;
-	bss_conf->last_tsf = cbss->tsf;
-
-	bss_info_changed |= BSS_CHANGED_BEACON_INT;
 	bss_info_changed |= ieee80211_handle_bss_capability(sdata,
 		cbss->capability, bss->has_erp_value, bss->erp_value);
 
@@ -1305,10 +1296,17 @@ static void ieee80211_set_associated(struct ieee80211_sub_if_data *sdata,
 
 	ieee80211_led_assoc(local, 1);
 
-	if (local->hw.flags & IEEE80211_HW_NEED_DTIM_PERIOD)
-		bss_conf->dtim_period = bss->dtim_period;
-	else
+	if (local->hw.flags & IEEE80211_HW_NEED_DTIM_PERIOD) {
+		/*
+		 * If the AP is buggy we may get here with no DTIM period
+		 * known, so assume it's 1 which is the only safe assumption
+		 * in that case, although if the TIM IE is broken powersave
+		 * probably just won't work at all.
+		 */
+		bss_conf->dtim_period = sdata->u.mgd.dtim_period ?: 1;
+	} else {
 		bss_conf->dtim_period = 0;
+	}
 
 	bss_conf->assoc = 1;
 
@@ -1441,6 +1439,8 @@ static void ieee80211_set_disassoc(struct ieee80211_sub_if_data *sdata,
 	del_timer_sync(&sdata->u.mgd.bcn_mon_timer);
 	del_timer_sync(&sdata->u.mgd.timer);
 	del_timer_sync(&sdata->u.mgd.chswitch_timer);
+
+	sdata->vif.bss_conf.dtim_period = 0;
 }
 
 void ieee80211_sta_rx_notify(struct ieee80211_sub_if_data *sdata,
@@ -2205,11 +2205,18 @@ static void ieee80211_rx_bss_info(struct ieee80211_sub_if_data *sdata,
 	struct ieee80211_channel *channel;
 	bool need_ps = false;
 
-	if (sdata->u.mgd.associated &&
-	    ether_addr_equal(mgmt->bssid, sdata->u.mgd.associated->bssid)) {
-		bss = (void *)sdata->u.mgd.associated->priv;
+	if ((sdata->u.mgd.associated &&
+	     ether_addr_equal(mgmt->bssid, sdata->u.mgd.associated->bssid)) ||
+	    (sdata->u.mgd.assoc_data &&
+	     ether_addr_equal(mgmt->bssid,
+			      sdata->u.mgd.assoc_data->bss->bssid))) {
 		/* not previously set so we may need to recalc */
-		need_ps = !bss->dtim_period;
+		need_ps = sdata->u.mgd.associated && !sdata->u.mgd.dtim_period;
+
+		if (elems->tim && !elems->parse_error) {
+			struct ieee80211_tim_ie *tim_ie = elems->tim;
+			sdata->u.mgd.dtim_period = tim_ie->dtim_period;
+		}
 	}
 
 	if (elems->ds_params && elems->ds_params_len == 1)
@@ -3161,9 +3168,15 @@ static int ieee80211_prep_connection(struct ieee80211_sub_if_data *sdata,
 
 		memcpy(ifmgd->bssid, cbss->bssid, ETH_ALEN);
 
-		/* tell driver about BSSID and basic rates */
+		/* set timing information */
+		sdata->vif.bss_conf.beacon_int = cbss->beacon_interval;
+		sdata->vif.bss_conf.sync_tsf = cbss->tsf;
+		sdata->vif.bss_conf.sync_device_ts = bss->device_ts;
+
+		/* tell driver about BSSID, basic rates and timing */
 		ieee80211_bss_info_change_notify(sdata,
-			BSS_CHANGED_BSSID | BSS_CHANGED_BASIC_RATES);
+			BSS_CHANGED_BSSID | BSS_CHANGED_BASIC_RATES |
+			BSS_CHANGED_BEACON_INT);
 
 		if (assoc)
 			sta_info_pre_move_state(sta, IEEE80211_STA_AUTH);
@@ -3413,20 +3426,39 @@ int ieee80211_mgd_assoc(struct ieee80211_sub_if_data *sdata,
 	/* kick off associate process */
 
 	ifmgd->assoc_data = assoc_data;
+	ifmgd->dtim_period = 0;
 
 	err = ieee80211_prep_connection(sdata, req->bss, true);
 	if (err)
 		goto err_clear;
 
-	if (!bss->dtim_period &&
-	    sdata->local->hw.flags & IEEE80211_HW_NEED_DTIM_PERIOD) {
-		/*
-		 * Wait up to one beacon interval ...
-		 * should this be more if we miss one?
-		 */
-		printk(KERN_DEBUG "%s: waiting for beacon from %pM\n",
-		       sdata->name, ifmgd->bssid);
-		assoc_data->timeout = TU_TO_EXP_TIME(req->bss->beacon_interval);
+	if (sdata->local->hw.flags & IEEE80211_HW_NEED_DTIM_PERIOD) {
+		const u8 *beacon_ies = req->bss->beacon_ies;
+		size_t beacon_ies_len = req->bss->len_beacon_ies;
+
+		if (!beacon_ies_len) {
+			/*
+			 * Wait up to one beacon interval ...
+			 * should this be more if we miss one?
+			 */
+			printk(KERN_DEBUG "%s: waiting for beacon from %pM\n",
+			       sdata->name, ifmgd->bssid);
+			assoc_data->timeout =
+				TU_TO_EXP_TIME(req->bss->beacon_interval);
+		} else {
+			const u8 *tim_ie = cfg80211_find_ie(WLAN_EID_TIM,
+							    beacon_ies,
+							    beacon_ies_len);
+			if (tim_ie && tim_ie[1] >=
+					sizeof(struct ieee80211_tim_ie)) {
+				const struct ieee80211_tim_ie *tim;
+				tim = (void *)(tim_ie + 2);
+				ifmgd->dtim_period = tim->dtim_period;
+			}
+			assoc_data->have_beacon = true;
+			assoc_data->sent_assoc = false;
+			assoc_data->timeout = jiffies;
+		}
 	} else {
 		assoc_data->have_beacon = true;
 		assoc_data->sent_assoc = false;
@@ -3467,6 +3499,7 @@ int ieee80211_mgd_deauth(struct ieee80211_sub_if_data *sdata,
 {
 	struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
 	u8 frame_buf[DEAUTH_DISASSOC_LEN];
+	bool tx = !req->local_state_change;
 
 	mutex_lock(&ifmgd->mtx);
 
@@ -3483,11 +3516,11 @@ int ieee80211_mgd_deauth(struct ieee80211_sub_if_data *sdata,
 	if (ifmgd->associated &&
 	    ether_addr_equal(ifmgd->associated->bssid, req->bssid))
 		ieee80211_set_disassoc(sdata, IEEE80211_STYPE_DEAUTH,
-				       req->reason_code, true, frame_buf);
+				       req->reason_code, tx, frame_buf);
 	else
 		ieee80211_send_deauth_disassoc(sdata, req->bssid,
 					       IEEE80211_STYPE_DEAUTH,
-					       req->reason_code, true,
+					       req->reason_code, tx,
 					       frame_buf);
 	mutex_unlock(&ifmgd->mtx);
 

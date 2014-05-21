@@ -129,7 +129,8 @@ int drm_open(struct inode *inode, struct file *filp)
 	minor = idr_find(&drm_minors_idr, minor_id);
 	if (!minor)
 		return -ENODEV;
-
+	if (IS_ERR(minor))
+		return PTR_ERR(minor);
 	if (!(dev = minor->dev))
 		return -ENODEV;
 
@@ -139,8 +140,11 @@ int drm_open(struct inode *inode, struct file *filp)
 	retcode = drm_open_helper(inode, filp, dev);
 	if (!retcode) {
 		atomic_inc(&dev->counts[_DRM_STAT_OPENS]);
-		if (!dev->open_count++)
+		if (!dev->open_count++) {
 			retcode = drm_setup(dev);
+			if (retcode)
+				dev->open_count--;
+		}
 	}
 	if (!retcode) {
 		mutex_lock(&dev->struct_mutex);
@@ -180,7 +184,10 @@ int drm_stub_open(struct inode *inode, struct file *filp)
 	minor = idr_find(&drm_minors_idr, minor_id);
 	if (!minor)
 		goto out;
-
+	if (IS_ERR(minor)) {
+		err = PTR_ERR(minor);
+		goto out;
+	}
 	if (!(dev = minor->dev))
 		goto out;
 

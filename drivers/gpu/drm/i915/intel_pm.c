@@ -2320,11 +2320,16 @@ void gen6_disable_rps(struct drm_device *dev)
 
 int intel_enable_rc6(const struct drm_device *dev)
 {
+	struct drm_i915_private *dev_priv = dev->dev_private;
+
 	/*
 	 * Respect the kernel parameter if it is set
 	 */
 	if (i915_enable_rc6 >= 0)
 		return i915_enable_rc6;
+
+	if (dev_priv->quirks & QUIRK_RC6_DISABLE)
+		return 0;
 
 	/*
 	 * Disable RC6 on Ironlake
@@ -2332,9 +2337,11 @@ int intel_enable_rc6(const struct drm_device *dev)
 	if (INTEL_INFO(dev)->gen == 5)
 		return 0;
 
-	/* Sorry Haswell, no RC6 for you for now. */
+	/* On Haswell, only RC6 is available. So let's enable it by default to
+	 * provide better testing and coverage since the beginning.
+	 */
 	if (IS_HASWELL(dev))
-		return 0;
+		return INTEL_RC6_ENABLE;
 
 	/*
 	 * Disable rc6 on Sandybridge
@@ -2397,23 +2404,27 @@ void gen6_enable_rps(struct drm_i915_private *dev_priv)
 	I915_WRITE(GEN6_RC_SLEEP, 0);
 	I915_WRITE(GEN6_RC1e_THRESHOLD, 1000);
 	I915_WRITE(GEN6_RC6_THRESHOLD, 50000);
-	I915_WRITE(GEN6_RC6p_THRESHOLD, 100000);
+	I915_WRITE(GEN6_RC6p_THRESHOLD, 150000);
 	I915_WRITE(GEN6_RC6pp_THRESHOLD, 64000); /* unused */
 
+	/* Check if we are enabling RC6 */
 	rc6_mode = intel_enable_rc6(dev_priv->dev);
 	if (rc6_mode & INTEL_RC6_ENABLE)
 		rc6_mask |= GEN6_RC_CTL_RC6_ENABLE;
 
-	if (rc6_mode & INTEL_RC6p_ENABLE)
-		rc6_mask |= GEN6_RC_CTL_RC6p_ENABLE;
+	/* We don't use those on Haswell */
+	if (!IS_HASWELL(dev_priv->dev)) {
+		if (rc6_mode & INTEL_RC6p_ENABLE)
+			rc6_mask |= GEN6_RC_CTL_RC6p_ENABLE;
 
-	if (rc6_mode & INTEL_RC6pp_ENABLE)
-		rc6_mask |= GEN6_RC_CTL_RC6pp_ENABLE;
+		if (rc6_mode & INTEL_RC6pp_ENABLE)
+			rc6_mask |= GEN6_RC_CTL_RC6pp_ENABLE;
+	}
 
 	DRM_INFO("Enabling RC6 states: RC6 %s, RC6p %s, RC6pp %s\n",
-			(rc6_mode & INTEL_RC6_ENABLE) ? "on" : "off",
-			(rc6_mode & INTEL_RC6p_ENABLE) ? "on" : "off",
-			(rc6_mode & INTEL_RC6pp_ENABLE) ? "on" : "off");
+			(rc6_mask & GEN6_RC_CTL_RC6_ENABLE) ? "on" : "off",
+			(rc6_mask & GEN6_RC_CTL_RC6p_ENABLE) ? "on" : "off",
+			(rc6_mask & GEN6_RC_CTL_RC6pp_ENABLE) ? "on" : "off");
 
 	I915_WRITE(GEN6_RC_CONTROL,
 		   rc6_mask |
@@ -2431,10 +2442,19 @@ void gen6_enable_rps(struct drm_i915_private *dev_priv)
 	I915_WRITE(GEN6_RP_INTERRUPT_LIMITS,
 		   dev_priv->max_delay << 24 |
 		   dev_priv->min_delay << 16);
-	I915_WRITE(GEN6_RP_UP_THRESHOLD, 59400);
-	I915_WRITE(GEN6_RP_DOWN_THRESHOLD, 245000);
-	I915_WRITE(GEN6_RP_UP_EI, 66000);
-	I915_WRITE(GEN6_RP_DOWN_EI, 350000);
+
+	if (IS_HASWELL(dev_priv->dev)) {
+		I915_WRITE(GEN6_RP_UP_THRESHOLD, 59400);
+		I915_WRITE(GEN6_RP_DOWN_THRESHOLD, 245000);
+		I915_WRITE(GEN6_RP_UP_EI, 66000);
+		I915_WRITE(GEN6_RP_DOWN_EI, 350000);
+	} else {
+		I915_WRITE(GEN6_RP_UP_THRESHOLD, 10000);
+		I915_WRITE(GEN6_RP_DOWN_THRESHOLD, 1000000);
+		I915_WRITE(GEN6_RP_UP_EI, 100000);
+		I915_WRITE(GEN6_RP_DOWN_EI, 5000000);
+	}
+
 	I915_WRITE(GEN6_RP_IDLE_HYSTERSIS, 10);
 	I915_WRITE(GEN6_RP_CONTROL,
 		   GEN6_RP_MEDIA_TURBO |
@@ -2442,7 +2462,7 @@ void gen6_enable_rps(struct drm_i915_private *dev_priv)
 		   GEN6_RP_MEDIA_IS_GFX |
 		   GEN6_RP_ENABLE |
 		   GEN6_RP_UP_BUSY_AVG |
-		   GEN6_RP_DOWN_IDLE_CONT);
+		   (IS_HASWELL(dev_priv->dev) ? GEN7_RP_DOWN_IDLE_AVG : GEN6_RP_DOWN_IDLE_CONT));
 
 	if (wait_for((I915_READ(GEN6_PCODE_MAILBOX) & GEN6_PCODE_READY) == 0,
 		     500))
@@ -3307,6 +3327,10 @@ static void gen6_init_clock_gating(struct drm_device *dev)
 		   I915_READ(ILK_DISPLAY_CHICKEN2) |
 		   ILK_ELPIN_409_SELECT);
 
+	/* WaDisableHiZPlanesWhenMSAAEnabled */
+	I915_WRITE(_3D_CHICKEN,
+		   _MASKED_BIT_ENABLE(_3D_CHICKEN_HIZ_PLANE_DISABLE_MSAA_4X_SNB));
+
 	I915_WRITE(WM3_LP_ILK, 0);
 	I915_WRITE(WM2_LP_ILK, 0);
 	I915_WRITE(WM1_LP_ILK, 0);
@@ -3334,8 +3358,8 @@ static void gen6_init_clock_gating(struct drm_device *dev)
 		   GEN6_RCCUNIT_CLOCK_GATE_DISABLE);
 
 	/* Bspec says we need to always set all mask bits. */
-	I915_WRITE(_3D_CHICKEN, (0xFFFF << 16) |
-		   _3D_CHICKEN_SF_DISABLE_FASTCLIP_CULL);
+	I915_WRITE(_3D_CHICKEN3, (0xFFFF << 16) |
+		   _3D_CHICKEN3_SF_DISABLE_FASTCLIP_CULL);
 
 	/*
 	 * According to the spec the following bits should be
@@ -3380,6 +3404,68 @@ static void gen7_setup_fixed_func_scheduler(struct drm_i915_private *dev_priv)
 	reg |= GEN7_FF_DS_SCHED_HW;
 
 	I915_WRITE(GEN7_FF_THREAD_MODE, reg);
+}
+
+static void haswell_init_clock_gating(struct drm_device *dev)
+{
+	struct drm_i915_private *dev_priv = dev->dev_private;
+	int pipe;
+	uint32_t dspclk_gate = VRHUNIT_CLOCK_GATE_DISABLE;
+
+	I915_WRITE(PCH_DSPCLK_GATE_D, dspclk_gate);
+
+	I915_WRITE(WM3_LP_ILK, 0);
+	I915_WRITE(WM2_LP_ILK, 0);
+	I915_WRITE(WM1_LP_ILK, 0);
+
+	/* According to the spec, bit 13 (RCZUNIT) must be set on IVB.
+	 * This implements the WaDisableRCZUnitClockGating workaround.
+	 */
+	I915_WRITE(GEN6_UCGCTL2, GEN6_RCZUNIT_CLOCK_GATE_DISABLE);
+
+	I915_WRITE(ILK_DSPCLK_GATE, IVB_VRHUNIT_CLK_GATE);
+
+	I915_WRITE(IVB_CHICKEN3,
+		   CHICKEN3_DGMG_REQ_OUT_FIX_DISABLE |
+		   CHICKEN3_DGMG_DONE_FIX_DISABLE);
+
+	/* Apply the WaDisableRHWOOptimizationForRenderHang workaround. */
+	I915_WRITE(GEN7_COMMON_SLICE_CHICKEN1,
+		   GEN7_CSC1_RHWO_OPT_DISABLE_IN_RCC);
+
+	/* WaApplyL3ControlAndL3ChickenMode requires those two on Ivy Bridge */
+	I915_WRITE(GEN7_L3CNTLREG1,
+			GEN7_WA_FOR_GEN7_L3_CONTROL);
+	I915_WRITE(GEN7_L3_CHICKEN_MODE_REGISTER,
+			GEN7_WA_L3_CHICKEN_MODE);
+
+	/* This is required by WaCatErrorRejectionIssue */
+	I915_WRITE(GEN7_SQ_CHICKEN_MBCUNIT_CONFIG,
+			I915_READ(GEN7_SQ_CHICKEN_MBCUNIT_CONFIG) |
+			GEN7_SQ_CHICKEN_MBCUNIT_SQINTMOB);
+
+	for_each_pipe(pipe) {
+		I915_WRITE(DSPCNTR(pipe),
+			   I915_READ(DSPCNTR(pipe)) |
+			   DISPPLANE_TRICKLE_FEED_DISABLE);
+		intel_flush_display_plane(dev_priv, pipe);
+	}
+
+	gen7_setup_fixed_func_scheduler(dev_priv);
+
+	/* WaDisable4x2SubspanOptimization */
+	I915_WRITE(CACHE_MODE_1,
+		   _MASKED_BIT_ENABLE(PIXEL_SUBSPAN_COLLECT_OPT_DISABLE));
+
+	/* XXX: This is a workaround for early silicon revisions and should be
+	 * removed later.
+	 */
+	I915_WRITE(WM_DBG,
+			I915_READ(WM_DBG) |
+			WM_DBG_DISALLOW_MULTIPLE_LP |
+			WM_DBG_DISALLOW_SPRITE |
+			WM_DBG_DISALLOW_MAXFIFO);
+
 }
 
 static void ivybridge_init_clock_gating(struct drm_device *dev)
@@ -3764,7 +3850,7 @@ void intel_init_pm(struct drm_device *dev)
 					      "Disable CxSR\n");
 				dev_priv->display.update_wm = NULL;
 			}
-			dev_priv->display.init_clock_gating = ivybridge_init_clock_gating;
+			dev_priv->display.init_clock_gating = haswell_init_clock_gating;
 			dev_priv->display.sanitize_pm = gen6_sanitize_pm;
 		} else
 			dev_priv->display.update_wm = NULL;

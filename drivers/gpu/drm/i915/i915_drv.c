@@ -118,6 +118,10 @@ module_param_named(i915_enable_ppgtt, i915_enable_ppgtt, int, 0600);
 MODULE_PARM_DESC(i915_enable_ppgtt,
 		"Enable PPGTT (default: true)");
 
+int i915_disable_pch_pwm __read_mostly = -1;
+module_param_named(disable_pch_pwm, i915_disable_pch_pwm, int, 0600);
+MODULE_PARM_DESC(disable_pch_pwm, "disable PCH_PWM (default: -1 (auto))");
+
 static struct drm_driver driver;
 extern int intel_agp_enabled;
 
@@ -351,13 +355,9 @@ static const struct pci_device_id pciidlist[] = {		/* aka */
 	INTEL_VGA_DEVICE(0x0162, &intel_ivybridge_d_info), /* GT2 desktop */
 	INTEL_VGA_DEVICE(0x015a, &intel_ivybridge_d_info), /* GT1 server */
 	INTEL_VGA_DEVICE(0x016a, &intel_ivybridge_d_info), /* GT2 server */
-	INTEL_VGA_DEVICE(0x0402, &intel_haswell_d_info), /* GT1 desktop */
-	INTEL_VGA_DEVICE(0x0412, &intel_haswell_d_info), /* GT2 desktop */
-	INTEL_VGA_DEVICE(0x040a, &intel_haswell_d_info), /* GT1 server */
-	INTEL_VGA_DEVICE(0x041a, &intel_haswell_d_info), /* GT2 server */
-	INTEL_VGA_DEVICE(0x0406, &intel_haswell_m_info), /* GT1 mobile */
-	INTEL_VGA_DEVICE(0x0416, &intel_haswell_m_info), /* GT2 mobile */
-	INTEL_VGA_DEVICE(0x0c16, &intel_haswell_d_info), /* SDV */
+	INTEL_VGA_DEVICE(0x0f30, &intel_valleyview_m_info),
+	INTEL_VGA_DEVICE(0x0157, &intel_valleyview_m_info),
+	INTEL_VGA_DEVICE(0x0155, &intel_valleyview_d_info),
 	{0, 0, 0}
 };
 
@@ -429,36 +429,68 @@ bool i915_semaphore_is_enabled(struct drm_device *dev)
 	return 1;
 }
 
+static void __gen6_gt_wait_for_thread_c0(struct drm_i915_private *dev_priv)
+{
+	u32 gt_thread_status_mask;
+
+	if (IS_HASWELL(dev_priv->dev))
+		gt_thread_status_mask = GEN6_GT_THREAD_STATUS_CORE_MASK_HSW;
+	else
+		gt_thread_status_mask = GEN6_GT_THREAD_STATUS_CORE_MASK;
+
+	/* w/a for a sporadic read returning 0 by waiting for the GT
+	 * thread to wake up.
+	 */
+	if (wait_for_atomic_us((I915_READ_NOTRACE(GEN6_GT_THREAD_STATUS_REG) & gt_thread_status_mask) == 0, 500))
+		DRM_ERROR("GT thread status wait timed out\n");
+}
+
 void __gen6_gt_force_wake_get(struct drm_i915_private *dev_priv)
 {
 	int count;
+	u32 forcewake_ack;
+
+	if (IS_HASWELL(dev_priv->dev))
+		forcewake_ack = FORCEWAKE_ACK_HSW;
+	else
+		forcewake_ack = FORCEWAKE_ACK;
 
 	count = 0;
-	while (count++ < 50 && (I915_READ_NOTRACE(FORCEWAKE_ACK) & 1))
+	while (count++ < 50 && (I915_READ_NOTRACE(forcewake_ack) & 1))
 		udelay(10);
 
 	I915_WRITE_NOTRACE(FORCEWAKE, 1);
 	POSTING_READ(FORCEWAKE);
 
 	count = 0;
-	while (count++ < 50 && (I915_READ_NOTRACE(FORCEWAKE_ACK) & 1) == 0)
+	while (count++ < 50 && (I915_READ_NOTRACE(forcewake_ack) & 1) == 0)
 		udelay(10);
+
+	__gen6_gt_wait_for_thread_c0(dev_priv);
 }
 
 void __gen6_gt_force_wake_mt_get(struct drm_i915_private *dev_priv)
 {
 	int count;
+	u32 forcewake_ack;
+
+	if (IS_HASWELL(dev_priv->dev))
+		forcewake_ack = FORCEWAKE_ACK_HSW;
+	else
+		forcewake_ack = FORCEWAKE_MT_ACK;
 
 	count = 0;
-	while (count++ < 50 && (I915_READ_NOTRACE(FORCEWAKE_MT_ACK) & 1))
+	while (count++ < 50 && (I915_READ_NOTRACE(forcewake_ack) & 1))
 		udelay(10);
 
 	I915_WRITE_NOTRACE(FORCEWAKE_MT, _MASKED_BIT_ENABLE(1));
 	POSTING_READ(FORCEWAKE_MT);
 
 	count = 0;
-	while (count++ < 50 && (I915_READ_NOTRACE(FORCEWAKE_MT_ACK) & 1) == 0)
+	while (count++ < 50 && (I915_READ_NOTRACE(forcewake_ack) & 1) == 0)
 		udelay(10);
+
+	__gen6_gt_wait_for_thread_c0(dev_priv);
 }
 
 /*
@@ -549,6 +581,8 @@ void vlv_force_wake_get(struct drm_i915_private *dev_priv)
 	count = 0;
 	while (count++ < 50 && (I915_READ_NOTRACE(FORCEWAKE_ACK_VLV) & 1) == 0)
 		udelay(10);
+
+	__gen6_gt_wait_for_thread_c0(dev_priv);
 }
 
 void vlv_force_wake_put(struct drm_i915_private *dev_priv)
@@ -925,10 +959,12 @@ int i915_reset(struct drm_device *dev)
 	return 0;
 }
 
-
 static int __devinit
 i915_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
+	struct intel_device_info *intel_info =
+		(struct intel_device_info *) ent->driver_data;
+
 	/* Only bind to function 0 of the device. Early generations
 	 * used function 1 as a placeholder for multi-head. This causes
 	 * us confusion instead, especially on the systems where both
@@ -936,6 +972,18 @@ i915_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	 */
 	if (PCI_FUNC(pdev->devfn))
 		return -ENODEV;
+
+	/* We've managed to ship a kms-enabled ddx that shipped with an XvMC
+	 * implementation for gen3 (and only gen3) that used legacy drm maps
+	 * (gasp!) to share buffers between X and the client. Hence we need to
+	 * keep around the fake agp stuff for gen3, even when kms is enabled. */
+	if (intel_info->gen != 3) {
+		driver.driver_features &=
+			~(DRIVER_USE_AGP | DRIVER_REQUIRE_AGP);
+	} else if (!intel_agp_enabled) {
+		DRM_ERROR("drm/i915 can't work without intel_agp module!\n");
+		return -ENODEV;
+	}
 
 	return drm_get_pci_dev(pdev, ent, &driver);
 }
@@ -1097,11 +1145,6 @@ static struct pci_driver i915_pci_driver = {
 
 static int __init i915_init(void)
 {
-	if (!intel_agp_enabled) {
-		DRM_ERROR("drm/i915 can't work without intel_agp module!\n");
-		return -ENODEV;
-	}
-
 	driver.num_ioctls = i915_max_ioctl;
 
 	/*

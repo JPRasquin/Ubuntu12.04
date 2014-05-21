@@ -25,6 +25,7 @@
 
 #include <linux/types.h>
 #include <linux/i2c.h>
+#include <linux/delay.h>
 
 /* From the VESA DisplayPort spec */
 
@@ -92,6 +93,13 @@
 # define DP_PSR_SETUP_TIME_0                (6 << 1)
 # define DP_PSR_SETUP_TIME_MASK             (7 << 1)
 # define DP_PSR_SETUP_TIME_SHIFT            1
+# define DP_DOWNSTREAM_PORT_0		0x80
+# define DP_DS_PORT_TYPE_MASK		(7 << 0)
+# define DP_DS_PORT_TYPE_VGA		1
+# define DP_DS_PORT_TYPE_NON_EDID	4
+# define DP_DS_PORT_HPD			(1 << 3)
+# define DP_SINK_COUNT			0x200
+# define DP_GET_SINK_COUNT(x)		((((x) & 0x80) >> 1) | ((x) & 0x3f))
 
 /* link configuration */
 #define	DP_LINK_BW_SET		            0x100
@@ -256,5 +264,34 @@ struct i2c_algo_dp_aux_data {
 
 int
 i2c_dp_aux_add_bus(struct i2c_adapter *adapter);
+
+#define DP_LINK_STATUS_SIZE       6
+bool drm_dp_channel_eq_ok(u8 link_status[DP_LINK_STATUS_SIZE],
+			  int lane_count);
+bool drm_dp_clock_recovery_ok(u8 link_status[DP_LINK_STATUS_SIZE],
+			      int lane_count);
+u8 drm_dp_get_adjust_request_voltage(u8 link_status[DP_LINK_STATUS_SIZE],
+				     int lane);
+u8 drm_dp_get_adjust_request_pre_emphasis(u8 link_status[DP_LINK_STATUS_SIZE],
+					  int lane);
+
+#define DP_RECEIVER_CAP_SIZE    0xf
+void drm_dp_link_train_clock_recovery_delay(u8 dpcd[DP_RECEIVER_CAP_SIZE]);
+void drm_dp_link_train_channel_eq_delay(u8 dpcd[DP_RECEIVER_CAP_SIZE]);
+
+u8 drm_dp_link_rate_to_bw_code(int link_rate);
+int drm_dp_bw_code_to_link_rate(u8 link_bw);
+
+static inline int
+drm_dp_max_link_rate(u8 dpcd[DP_RECEIVER_CAP_SIZE])
+{
+	return drm_dp_bw_code_to_link_rate(dpcd[DP_MAX_LINK_RATE]);
+}
+
+static inline u8
+drm_dp_max_lane_count(u8 dpcd[DP_RECEIVER_CAP_SIZE])
+{
+	return dpcd[DP_MAX_LANE_COUNT] & DP_MAX_LANE_COUNT_MASK;
+}
 
 #endif /* _DRM_DP_HELPER_H_ */

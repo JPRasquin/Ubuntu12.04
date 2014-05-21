@@ -59,9 +59,9 @@
 #endif
 #include "igb.h"
 
-#define MAJ 3
-#define MIN 4
-#define BUILD 7
+#define MAJ 4
+#define MIN 0
+#define BUILD 1
 #define DRV_VERSION __stringify(MAJ) "." __stringify(MIN) "." \
 __stringify(BUILD) "-k"
 char igb_driver_name[] = "igb";
@@ -462,10 +462,10 @@ static void igb_dump(struct igb_adapter *adapter)
 				(u64)buffer_info->time_stamp,
 				buffer_info->skb, next_desc);
 
-			if (netif_msg_pktdata(adapter) && buffer_info->dma != 0)
+			if (netif_msg_pktdata(adapter) && buffer_info->skb)
 				print_hex_dump(KERN_INFO, "",
 					DUMP_PREFIX_ADDRESS,
-					16, 1, phys_to_virt(buffer_info->dma),
+					16, 1, buffer_info->skb->data,
 					buffer_info->length, true);
 		}
 	}
@@ -547,18 +547,17 @@ rx_ring_summary:
 					(u64)buffer_info->dma,
 					buffer_info->skb, next_desc);
 
-				if (netif_msg_pktdata(adapter)) {
+				if (netif_msg_pktdata(adapter) &&
+				    buffer_info->dma && buffer_info->skb) {
 					print_hex_dump(KERN_INFO, "",
-						DUMP_PREFIX_ADDRESS,
-						16, 1,
-						phys_to_virt(buffer_info->dma),
-						IGB_RX_HDR_LEN, true);
+						  DUMP_PREFIX_ADDRESS,
+						  16, 1, buffer_info->skb->data,
+						  IGB_RX_HDR_LEN, true);
 					print_hex_dump(KERN_INFO, "",
 					  DUMP_PREFIX_ADDRESS,
 					  16, 1,
-					  phys_to_virt(
-					    buffer_info->page_dma +
-					    buffer_info->page_offset),
+					  page_address(buffer_info->page) +
+						      buffer_info->page_offset,
 					  PAGE_SIZE/2, true);
 				}
 			}
@@ -937,16 +936,17 @@ static int igb_request_msix(struct igb_adapter *adapter)
 {
 	struct net_device *netdev = adapter->netdev;
 	struct e1000_hw *hw = &adapter->hw;
-	int i, err = 0, vector = 0;
+	int i, err = 0, vector = 0, free_vector = 0;
 
 	err = request_irq(adapter->msix_entries[vector].vector,
 	                  igb_msix_other, 0, netdev->name, adapter);
 	if (err)
-		goto out;
-	vector++;
+		goto err_out;
 
 	for (i = 0; i < adapter->num_q_vectors; i++) {
 		struct igb_q_vector *q_vector = adapter->q_vector[i];
+
+		vector++;
 
 		q_vector->itr_register = hw->hw_addr + E1000_EITR(vector);
 
@@ -966,13 +966,22 @@ static int igb_request_msix(struct igb_adapter *adapter)
 		                  igb_msix_ring, 0, q_vector->name,
 		                  q_vector);
 		if (err)
-			goto out;
-		vector++;
+			goto err_free;
 	}
 
 	igb_configure_msix(adapter);
 	return 0;
-out:
+
+err_free:
+	/* free already assigned IRQs */
+	free_irq(adapter->msix_entries[free_vector++].vector, adapter);
+
+	vector--;
+	for (i = 0; i < vector; i++) {
+		free_irq(adapter->msix_entries[free_vector++].vector,
+			 adapter->q_vector[i]);
+	}
+err_out:
 	return err;
 }
 
@@ -1047,11 +1056,6 @@ static int igb_set_interrupt_capability(struct igb_adapter *adapter)
 	/* if tx handler is separate add 1 for every tx queue */
 	if (!(adapter->flags & IGB_FLAG_QUEUE_PAIRS))
 		numvecs += adapter->num_tx_queues;
-
-	/* i210 and i211 can only have 4 MSIX vectors for rx/tx queues. */
-	if ((adapter->hw.mac.type == e1000_i210)
-		|| (adapter->hw.mac.type == e1000_i211))
-		numvecs = 4;
 
 	/* store the number of vectors reserved for queues */
 	adapter->num_q_vectors = numvecs;
@@ -1505,11 +1509,12 @@ static void igb_configure(struct igb_adapter *adapter)
  **/
 void igb_power_up_link(struct igb_adapter *adapter)
 {
+	igb_reset_phy(&adapter->hw);
+
 	if (adapter->hw.phy.media_type == e1000_media_type_copper)
 		igb_power_up_phy_copper(&adapter->hw);
 	else
 		igb_power_up_serdes_link_82575(&adapter->hw);
-	igb_reset_phy(&adapter->hw);
 }
 
 /**
@@ -1821,6 +1826,69 @@ static const struct net_device_ops igb_netdev_ops = {
 };
 
 /**
+ * igb_set_fw_version - Configure version string for ethtool
+ * @adapter: adapter struct
+ *
+ **/
+void igb_set_fw_version(struct igb_adapter *adapter)
+{
+	struct e1000_hw *hw = &adapter->hw;
+	u16 eeprom_verh, eeprom_verl, comb_verh, comb_verl, comb_offset;
+	u16 major, build, patch, fw_version;
+	u32 etrack_id;
+
+	hw->nvm.ops.read(hw, 5, 1, &fw_version);
+	if (adapter->hw.mac.type != e1000_i211) {
+		hw->nvm.ops.read(hw, NVM_ETRACK_WORD, 1, &eeprom_verh);
+		hw->nvm.ops.read(hw, (NVM_ETRACK_WORD + 1), 1, &eeprom_verl);
+		etrack_id = (eeprom_verh << IGB_ETRACK_SHIFT) | eeprom_verl;
+
+		/* combo image version needs to be found */
+		hw->nvm.ops.read(hw, NVM_COMB_VER_PTR, 1, &comb_offset);
+		if ((comb_offset != 0x0) &&
+		    (comb_offset != IGB_NVM_VER_INVALID)) {
+			hw->nvm.ops.read(hw, (NVM_COMB_VER_OFF + comb_offset
+					 + 1), 1, &comb_verh);
+			hw->nvm.ops.read(hw, (NVM_COMB_VER_OFF + comb_offset),
+					 1, &comb_verl);
+
+			/* Only display Option Rom if it exists and is valid */
+			if ((comb_verh && comb_verl) &&
+			    ((comb_verh != IGB_NVM_VER_INVALID) &&
+			     (comb_verl != IGB_NVM_VER_INVALID))) {
+				major = comb_verl >> IGB_COMB_VER_SHFT;
+				build = (comb_verl << IGB_COMB_VER_SHFT) |
+					(comb_verh >> IGB_COMB_VER_SHFT);
+				patch = comb_verh & IGB_COMB_VER_MASK;
+				snprintf(adapter->fw_version,
+					 sizeof(adapter->fw_version),
+					 "%d.%d%d, 0x%08x, %d.%d.%d",
+					 (fw_version & IGB_MAJOR_MASK) >>
+					 IGB_MAJOR_SHIFT,
+					 (fw_version & IGB_MINOR_MASK) >>
+					 IGB_MINOR_SHIFT,
+					 (fw_version & IGB_BUILD_MASK),
+					 etrack_id, major, build, patch);
+				goto out;
+			}
+		}
+		snprintf(adapter->fw_version, sizeof(adapter->fw_version),
+			 "%d.%d%d, 0x%08x",
+			 (fw_version & IGB_MAJOR_MASK) >> IGB_MAJOR_SHIFT,
+			 (fw_version & IGB_MINOR_MASK) >> IGB_MINOR_SHIFT,
+			 (fw_version & IGB_BUILD_MASK), etrack_id);
+	} else {
+		snprintf(adapter->fw_version, sizeof(adapter->fw_version),
+			 "%d.%d%d",
+			 (fw_version & IGB_MAJOR_MASK) >> IGB_MAJOR_SHIFT,
+			 (fw_version & IGB_MINOR_MASK) >> IGB_MINOR_SHIFT,
+			 (fw_version & IGB_BUILD_MASK));
+	}
+out:
+	return;
+}
+
+/**
  * igb_probe - Device Initialization Routine
  * @pdev: PCI device information struct
  * @ent: entry in igb_pci_tbl
@@ -2029,6 +2097,9 @@ static int __devinit igb_probe(struct pci_dev *pdev,
 		err = -EIO;
 		goto err_eeprom;
 	}
+
+	/* get firmware version for ethtool -i */
+	igb_set_fw_version(adapter);
 
 	setup_timer(&adapter->watchdog_timer, igb_watchdog,
 	            (unsigned long) adapter);
@@ -2338,6 +2409,7 @@ static int __devinit igb_sw_init(struct igb_adapter *adapter)
 	struct e1000_hw *hw = &adapter->hw;
 	struct net_device *netdev = adapter->netdev;
 	struct pci_dev *pdev = adapter->pdev;
+	u32 max_rss_queues;
 
 	pci_read_config_word(pdev, PCI_COMMAND, &hw->bus.pci_cmd_word);
 
@@ -2370,40 +2442,69 @@ static int __devinit igb_sw_init(struct igb_adapter *adapter)
 		} else
 			adapter->vfs_allocated_count = max_vfs;
 		break;
-	case e1000_i210:
-	case e1000_i211:
-		adapter->vfs_allocated_count = 0;
-		break;
 	default:
 		break;
 	}
 #endif /* CONFIG_PCI_IOV */
+
+	/* Determine the maximum number of RSS queues supported. */
 	switch (hw->mac.type) {
-	case e1000_i210:
-		adapter->rss_queues = min_t(u32, IGB_MAX_RX_QUEUES_I210,
-			num_online_cpus());
-		break;
 	case e1000_i211:
-		adapter->rss_queues = min_t(u32, IGB_MAX_RX_QUEUES_I211,
-			num_online_cpus());
+		max_rss_queues = IGB_MAX_RX_QUEUES_I211;
 		break;
+	case e1000_82575:
+	case e1000_i210:
+		max_rss_queues = IGB_MAX_RX_QUEUES_82575;
+		break;
+	case e1000_i350:
+		/* I350 cannot do RSS and SR-IOV at the same time */
+		if (!!adapter->vfs_allocated_count) {
+			max_rss_queues = 1;
+			break;
+		}
+		/* fall through */
+	case e1000_82576:
+		if (!!adapter->vfs_allocated_count) {
+			max_rss_queues = 2;
+			break;
+		}
+		/* fall through */
+	case e1000_82580:
 	default:
-		adapter->rss_queues = min_t(u32, IGB_MAX_RX_QUEUES,
-		num_online_cpus());
+		max_rss_queues = IGB_MAX_RX_QUEUES;
 		break;
 	}
-	/* i350 cannot do RSS and SR-IOV at the same time */
-	if (hw->mac.type == e1000_i350 && adapter->vfs_allocated_count)
-		adapter->rss_queues = 1;
 
-	/*
-	 * if rss_queues > 4 or vfs are going to be allocated with rss_queues
-	 * then we should combine the queues into a queue pair in order to
-	 * conserve interrupts due to limited supply
-	 */
-	if ((adapter->rss_queues > 4) ||
-	    ((adapter->rss_queues > 1) && (adapter->vfs_allocated_count > 6)))
-		adapter->flags |= IGB_FLAG_QUEUE_PAIRS;
+	adapter->rss_queues = min_t(u32, max_rss_queues, num_online_cpus());
+
+	/* Determine if we need to pair queues. */
+	switch (hw->mac.type) {
+	case e1000_82575:
+	case e1000_i211:
+		/* Device supports enough interrupts without queue pairing. */
+		break;
+	case e1000_82576:
+		/*
+		 * If VFs are going to be allocated with RSS queues then we
+		 * should pair the queues in order to conserve interrupts due
+		 * to limited supply.
+		 */
+		if ((adapter->rss_queues > 1) &&
+		    (adapter->vfs_allocated_count > 6))
+			adapter->flags |= IGB_FLAG_QUEUE_PAIRS;
+		/* fall through */
+	case e1000_82580:
+	case e1000_i350:
+	case e1000_i210:
+	default:
+		/*
+		 * If rss_queues > half of max_rss_queues, pair the queues in
+		 * order to conserve interrupts due to limited supply.
+		 */
+		if (adapter->rss_queues > (max_rss_queues / 2))
+			adapter->flags |= IGB_FLAG_QUEUE_PAIRS;
+		break;
+	}
 
 	/* Setup and initialize a copy of the hw vlan table array */
 	adapter->shadow_vfta = kzalloc(sizeof(u32) *
@@ -4570,11 +4671,13 @@ void igb_update_stats(struct igb_adapter *adapter,
 	bytes = 0;
 	packets = 0;
 	for (i = 0; i < adapter->num_rx_queues; i++) {
-		u32 rqdpc_tmp = rd32(E1000_RQDPC(i)) & 0x0FFF;
+		u32 rqdpc = rd32(E1000_RQDPC(i));
 		struct igb_ring *ring = adapter->rx_ring[i];
 
-		ring->rx_stats.drops += rqdpc_tmp;
-		net_stats->rx_fifo_errors += rqdpc_tmp;
+		if (rqdpc) {
+			ring->rx_stats.drops += rqdpc;
+			net_stats->rx_fifo_errors += rqdpc;
+		}
 
 		do {
 			start = u64_stats_fetch_begin_bh(&ring->rx_syncp);
@@ -6997,6 +7100,11 @@ static void igb_set_vf_rate_limit(struct e1000_hw *hw, int vf, int tx_rate,
 	}
 
 	wr32(E1000_RTTDQSEL, vf); /* vf X uses queue X */
+	/*
+	 * Set global transmit compensation time to the MMW_SIZE in RTTBCNRM
+	 * register. MMW_SIZE=0x014 if 9728-byte jumbo is supported.
+	 */
+	wr32(E1000_RTTBCNRM, 0x14);
 	wr32(E1000_RTTBCNRC, bcnrc_val);
 }
 

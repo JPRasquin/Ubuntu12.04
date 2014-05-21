@@ -271,13 +271,6 @@ static const struct drm_encoder_helper_funcs radeon_legacy_lvds_helper_funcs = {
 
 #if defined(CONFIG_BACKLIGHT_CLASS_DEVICE) || defined(CONFIG_BACKLIGHT_CLASS_DEVICE_MODULE)
 
-#define MAX_RADEON_LEVEL 0xFF
-
-struct radeon_backlight_privdata {
-	struct radeon_encoder *encoder;
-	uint8_t negative;
-};
-
 static uint8_t radeon_legacy_lvds_level(struct backlight_device *bd)
 {
 	struct radeon_backlight_privdata *pdata = bl_get_data(bd);
@@ -286,13 +279,13 @@ static uint8_t radeon_legacy_lvds_level(struct backlight_device *bd)
 	/* Convert brightness to hardware level */
 	if (bd->props.brightness < 0)
 		level = 0;
-	else if (bd->props.brightness > MAX_RADEON_LEVEL)
-		level = MAX_RADEON_LEVEL;
+	else if (bd->props.brightness > RADEON_MAX_BL_LEVEL)
+		level = RADEON_MAX_BL_LEVEL;
 	else
 		level = bd->props.brightness;
 
 	if (pdata->negative)
-		level = MAX_RADEON_LEVEL - level;
+		level = RADEON_MAX_BL_LEVEL - level;
 
 	return level;
 }
@@ -336,7 +329,7 @@ static int radeon_legacy_backlight_get_brightness(struct backlight_device *bd)
 	backlight_level = (RREG32(RADEON_LVDS_GEN_CNTL) >>
 			   RADEON_LVDS_BL_MOD_LEVEL_SHIFT) & 0xff;
 
-	return pdata->negative ? MAX_RADEON_LEVEL - backlight_level : backlight_level;
+	return pdata->negative ? RADEON_MAX_BL_LEVEL - backlight_level : backlight_level;
 }
 
 static const struct backlight_ops radeon_backlight_ops = {
@@ -370,7 +363,7 @@ void radeon_legacy_backlight_init(struct radeon_encoder *radeon_encoder,
 	}
 
 	memset(&props, 0, sizeof(props));
-	props.max_brightness = MAX_RADEON_LEVEL;
+	props.max_brightness = RADEON_MAX_BL_LEVEL;
 	props.type = BACKLIGHT_RAW;
 	bd = backlight_device_register("radeon_bl", &drm_connector->kdev,
 				       pdata, &radeon_backlight_ops, &props);
@@ -449,7 +442,7 @@ static void radeon_legacy_backlight_exit(struct radeon_encoder *radeon_encoder)
 	}
 
 	if (bd) {
-		struct radeon_legacy_backlight_privdata *pdata;
+		struct radeon_backlight_privdata *pdata;
 
 		pdata = bl_get_data(bd);
 		backlight_device_unregister(bd);
@@ -618,6 +611,14 @@ static enum drm_connector_status radeon_legacy_primary_dac_detect(struct drm_enc
 	enum drm_connector_status found = connector_status_disconnected;
 	bool color = true;
 
+	/* just don't bother on RN50 those chip are often connected to remoting
+	 * console hw and often we get failure to load detect those. So to make
+	 * everyone happy report the encoder as always connected.
+	 */
+	if (ASIC_IS_RN50(rdev)) {
+		return connector_status_connected;
+	}
+
 	/* save the regs we need */
 	vclk_ecp_cntl = RREG32_PLL(RADEON_VCLK_ECP_CNTL);
 	crtc_ext_cntl = RREG32(RADEON_CRTC_EXT_CNTL);
@@ -651,6 +652,7 @@ static enum drm_connector_status radeon_legacy_primary_dac_detect(struct drm_enc
 	tmp |= RADEON_DAC_RANGE_CNTL_PS2 | RADEON_DAC_CMP_EN;
 	WREG32(RADEON_DAC_CNTL, tmp);
 
+	tmp = dac_macro_cntl;
 	tmp &= ~(RADEON_DAC_PDWN_R |
 		 RADEON_DAC_PDWN_G |
 		 RADEON_DAC_PDWN_B);
@@ -974,11 +976,7 @@ static void radeon_legacy_tmds_ext_mode_set(struct drm_encoder *encoder,
 static void radeon_ext_tmds_enc_destroy(struct drm_encoder *encoder)
 {
 	struct radeon_encoder *radeon_encoder = to_radeon_encoder(encoder);
-	struct radeon_encoder_ext_tmds *tmds = radeon_encoder->enc_priv;
-	if (tmds) {
-		if (tmds->i2c_bus)
-			radeon_i2c_destroy(tmds->i2c_bus);
-	}
+	/* don't destroy the i2c bus record here, this will be done in radeon_i2c_fini */
 	kfree(radeon_encoder->enc_priv);
 	drm_encoder_cleanup(encoder);
 	kfree(radeon_encoder);

@@ -314,6 +314,8 @@ struct e1000_adapter {
 
 	struct napi_struct napi;
 
+	unsigned int uncorr_errors;	/* uncorrectable ECC errors */
+	unsigned int corr_errors;	/* correctable ECC errors */
 	unsigned int restart_queue;
 	u32 txd_cmd;
 
@@ -515,6 +517,7 @@ extern void e1000e_set_interrupt_capability(struct e1000_adapter *adapter);
 extern void e1000e_reset_interrupt_capability(struct e1000_adapter *adapter);
 extern void e1000e_get_hw_control(struct e1000_adapter *adapter);
 extern void e1000e_release_hw_control(struct e1000_adapter *adapter);
+extern void e1000e_write_itr(struct e1000_adapter *adapter, u32 itr);
 
 extern unsigned int copybreak;
 

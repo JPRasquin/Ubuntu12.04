@@ -200,6 +200,12 @@ typedef struct _drm_i915_sarea {
 #define DRM_I915_GEM_EXECBUFFER2	0x29
 #define DRM_I915_GET_SPRITE_COLORKEY	0x2a
 #define DRM_I915_SET_SPRITE_COLORKEY	0x2b
+#define DRM_I915_GEM_WAIT	0x2c
+#define DRM_I915_GEM_CONTEXT_CREATE    0x2d
+#define DRM_I915_GEM_CONTEXT_DESTROY   0x2e
+#define DRM_I915_GEM_SET_CACHING	0x2f
+#define DRM_I915_GEM_GET_CACHING	0x30
+#define DRM_I915_REG_READ		0x31
 
 #define DRM_IOCTL_I915_INIT		DRM_IOW( DRM_COMMAND_BASE + DRM_I915_INIT, drm_i915_init_t)
 #define DRM_IOCTL_I915_FLUSH		DRM_IO ( DRM_COMMAND_BASE + DRM_I915_FLUSH)
@@ -224,6 +230,8 @@ typedef struct _drm_i915_sarea {
 #define DRM_IOCTL_I915_GEM_PIN		DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_GEM_PIN, struct drm_i915_gem_pin)
 #define DRM_IOCTL_I915_GEM_UNPIN	DRM_IOW(DRM_COMMAND_BASE + DRM_I915_GEM_UNPIN, struct drm_i915_gem_unpin)
 #define DRM_IOCTL_I915_GEM_BUSY		DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_GEM_BUSY, struct drm_i915_gem_busy)
+#define DRM_IOCTL_I915_GEM_SET_CACHING		DRM_IOW(DRM_COMMAND_BASE + DRM_I915_GEM_SET_CACHING, struct drm_i915_gem_caching)
+#define DRM_IOCTL_I915_GEM_GET_CACHING		DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_GEM_GET_CACHING, struct drm_i915_gem_caching)
 #define DRM_IOCTL_I915_GEM_THROTTLE	DRM_IO ( DRM_COMMAND_BASE + DRM_I915_GEM_THROTTLE)
 #define DRM_IOCTL_I915_GEM_ENTERVT	DRM_IO(DRM_COMMAND_BASE + DRM_I915_GEM_ENTERVT)
 #define DRM_IOCTL_I915_GEM_LEAVEVT	DRM_IO(DRM_COMMAND_BASE + DRM_I915_GEM_LEAVEVT)
@@ -243,6 +251,10 @@ typedef struct _drm_i915_sarea {
 #define DRM_IOCTL_I915_OVERLAY_ATTRS	DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_OVERLAY_ATTRS, struct drm_intel_overlay_attrs)
 #define DRM_IOCTL_I915_SET_SPRITE_COLORKEY DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_SET_SPRITE_COLORKEY, struct drm_intel_sprite_colorkey)
 #define DRM_IOCTL_I915_GET_SPRITE_COLORKEY DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_SET_SPRITE_COLORKEY, struct drm_intel_sprite_colorkey)
+#define DRM_IOCTL_I915_GEM_WAIT			DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_GEM_WAIT, struct drm_i915_gem_wait)
+#define DRM_IOCTL_I915_GEM_CONTEXT_CREATE	DRM_IOWR (DRM_COMMAND_BASE + DRM_I915_GEM_CONTEXT_CREATE, struct drm_i915_gem_context_create)
+#define DRM_IOCTL_I915_GEM_CONTEXT_DESTROY	DRM_IOW (DRM_COMMAND_BASE + DRM_I915_GEM_CONTEXT_DESTROY, struct drm_i915_gem_context_destroy)
+#define DRM_IOCTL_I915_REG_READ			DRM_IOWR (DRM_COMMAND_BASE + DRM_I915_REG_READ, struct drm_i915_reg_read)
 
 /* Allow drivers to submit batchbuffers directly to hardware, relying
  * on the security mechanisms provided by hardware.
@@ -298,6 +310,10 @@ typedef struct drm_i915_irq_wait {
 #define I915_PARAM_HAS_GEN7_SOL_RESET	 16
 #define I915_PARAM_HAS_LLC     	 	 17
 #define I915_PARAM_HAS_ALIASING_PPGTT	 18
+#define I915_PARAM_HAS_WAIT_TIMEOUT	 19
+#define I915_PARAM_HAS_SEMAPHORES	 20
+#define I915_PARAM_HAS_PRIME_VMAP_FLUSH	 21
+#define I915_PARAM_HAS_SECURE_BATCHES   23
 
 typedef struct drm_i915_getparam {
 	int param;
@@ -663,6 +679,17 @@ struct drm_i915_gem_execbuffer2 {
 /** Resets the SO write offset registers for transform feedback on gen7. */
 #define I915_EXEC_GEN7_SOL_RESET	(1<<8)
 
+/** Request a privileged ("secure") batch buffer. Note only available for
+ * DRM_ROOT_ONLY | DRM_MASTER processes.
+ */
+#define I915_EXEC_SECURE               (1<<9)
+
+#define I915_EXEC_CONTEXT_ID_MASK      (0xffffffff)
+#define i915_execbuffer2_set_context_id(eb2, context) \
+	(eb2).rsvd1 = context & I915_EXEC_CONTEXT_ID_MASK
+#define i915_execbuffer2_get_context_id(eb2) \
+	((eb2).rsvd1 & I915_EXEC_CONTEXT_ID_MASK)
+
 struct drm_i915_gem_pin {
 	/** Handle of the buffer to be pinned. */
 	__u32 handle;
@@ -687,6 +714,17 @@ struct drm_i915_gem_busy {
 
 	/** Return busy status (1 if busy, 0 if idle) */
 	__u32 busy;
+};
+
+#define I915_CACHING_NONE		0
+#define I915_CACHING_CACHED		1
+
+struct drm_i915_gem_caching {
+	/** Handle of the buffer to set/get the cacheing level of */
+	__u32 handle;
+
+	/** Cacheing level to apply or return value */
+	__u32 caching;
 };
 
 #define I915_TILING_NONE	0
@@ -884,6 +922,29 @@ struct drm_intel_sprite_colorkey {
 	__u32 channel_mask;
 	__u32 max_value;
 	__u32 flags;
+};
+struct drm_i915_gem_wait {
+	/** Handle of BO we shall wait on */
+	__u32 bo_handle;
+	__u32 flags;
+	/** Number of nanoseconds to wait, Returns time remaining. */
+	__u64 timeout_ns;
+};
+
+struct drm_i915_gem_context_create {
+	/*  output: id of new context*/
+	__u32 ctx_id;
+	__u32 pad;
+};
+
+struct drm_i915_gem_context_destroy {
+	__u32 ctx_id;
+	__u32 pad;
+};
+
+struct drm_i915_reg_read {
+	__u64 offset;
+	__u64 val; /* Return value */
 };
 
 #endif				/* _I915_DRM_H_ */

@@ -116,6 +116,8 @@ struct mga_fbdev {
 	void *sysram;
 	int size;
 	struct ttm_bo_kmap_obj mapping;
+	int x1, y1, x2, y2; /* dirty rect */
+	spinlock_t dirty_lock;
 };
 
 struct mga_crtc {
@@ -198,7 +200,8 @@ struct mga_device {
 		atomic_t validate_sequence;
 	} ttm;
 
-	u32 reg_1e24; /* SE model number */
+	/* SE model number stored in reg 0x1e24 */
+	u32 unique_rev_id;
 };
 
 

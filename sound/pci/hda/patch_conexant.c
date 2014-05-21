@@ -553,24 +553,12 @@ static int conexant_build_controls(struct hda_codec *codec)
 	return 0;
 }
 
-#ifdef CONFIG_SND_HDA_POWER_SAVE
-static int conexant_suspend(struct hda_codec *codec, pm_message_t state)
-{
-	snd_hda_shutup_pins(codec);
-	return 0;
-}
-#endif
-
 static const struct hda_codec_ops conexant_patch_ops = {
 	.build_controls = conexant_build_controls,
 	.build_pcms = conexant_build_pcms,
 	.init = conexant_init,
 	.free = conexant_free,
 	.set_power_state = conexant_set_power,
-#ifdef CONFIG_SND_HDA_POWER_SAVE
-	.suspend = conexant_suspend,
-#endif
-	.reboot_notify = snd_hda_shutup_pins,
 };
 
 #ifdef CONFIG_SND_HDA_INPUT_BEEP
@@ -1182,7 +1170,7 @@ static int patch_cxt5045(struct hda_codec *codec)
 	}
 
 	if (spec->beep_amp)
-		snd_hda_attach_beep_device(codec, spec->beep_amp);
+		snd_hda_attach_beep_device(codec, get_amp_nid_(spec->beep_amp));
 
 	return 0;
 }
@@ -1961,7 +1949,7 @@ static int patch_cxt5051(struct hda_codec *codec)
 	}
 
 	if (spec->beep_amp)
-		snd_hda_attach_beep_device(codec, spec->beep_amp);
+		snd_hda_attach_beep_device(codec, get_amp_nid_(spec->beep_amp));
 
 	return 0;
 }
@@ -3148,7 +3136,7 @@ static int patch_cxt5066(struct hda_codec *codec)
 	}
 
 	if (spec->beep_amp)
-		snd_hda_attach_beep_device(codec, spec->beep_amp);
+		snd_hda_attach_beep_device(codec, get_amp_nid_(spec->beep_amp));
 
 	return 0;
 }
@@ -3545,8 +3533,9 @@ static int __select_input_connection(struct hda_codec *codec, hda_nid_t mux,
 				     hda_nid_t pin, hda_nid_t *srcp,
 				     bool do_select, int depth)
 {
+	struct conexant_spec *spec = codec->spec;
 	hda_nid_t conn[HDA_MAX_NUM_INPUTS];
-	int i, nums;
+	int startidx, i, nums;
 
 	switch (get_wcaps_type(get_wcaps(codec, mux))) {
 	case AC_WID_AUD_IN:
@@ -3570,14 +3559,25 @@ static int __select_input_connection(struct hda_codec *codec, hda_nid_t mux,
 	depth++;
 	if (depth == 2)
 		return -1;
+
+	/* Try to rotate around connections to avoid one boost controlling
+	   another input path as well */
+	startidx = 0;
+	for (i = 0; i < spec->private_imux.num_items; i++)
+		if (spec->imux_info[i].pin == pin) {
+			startidx = i;
+			break;
+		}
+
 	for (i = 0; i < nums; i++) {
-		int ret  = __select_input_connection(codec, conn[i], pin, srcp,
+		int j = (i + startidx) % nums;
+		int ret  = __select_input_connection(codec, conn[j], pin, srcp,
 						     do_select, depth);
 		if (ret >= 0) {
 			if (do_select)
 				snd_hda_codec_write(codec, mux, 0,
-						    AC_VERB_SET_CONNECT_SEL, i);
-			return i;
+						    AC_VERB_SET_CONNECT_SEL, j);
+			return j;
 		}
 	}
 	return -1;
@@ -4267,7 +4267,7 @@ static int cx_auto_add_boost_volume(struct hda_codec *codec, int idx,
 
 	if (get_wcaps(codec, mux) & AC_WCAP_OUT_AMP) {
 		spec->imux_info[idx].boost = mux;
-		return cx_auto_add_volume(codec, label, " Boost", 0,
+		return cx_auto_add_volume(codec, label, " Boost", cidx,
 					  mux, HDA_OUTPUT);
 	}
 	return 0;
@@ -4401,10 +4401,6 @@ static const struct hda_codec_ops cx_auto_patch_ops = {
 	.init = cx_auto_init,
 	.free = conexant_free,
 	.unsol_event = cx_auto_unsol_event,
-#ifdef CONFIG_SND_HDA_POWER_SAVE
-	.suspend = conexant_suspend,
-#endif
-	.reboot_notify = snd_hda_shutup_pins,
 };
 
 /*
@@ -4461,6 +4457,7 @@ static const struct snd_pci_quirk cxt5051_fixups[] = {
 };
 
 static const struct snd_pci_quirk cxt5066_fixups[] = {
+	SND_PCI_QUIRK(0x1025, 0x0543, "Acer Aspire One 522", CXT_FIXUP_STEREO_DMIC),
 	SND_PCI_QUIRK(0x17aa, 0x20f2, "Lenovo T400", CXT_PINCFG_LENOVO_TP410),
 	SND_PCI_QUIRK(0x17aa, 0x215e, "Lenovo T410", CXT_PINCFG_LENOVO_TP410),
 	SND_PCI_QUIRK(0x17aa, 0x215f, "Lenovo T510", CXT_PINCFG_LENOVO_TP410),
@@ -4543,7 +4540,7 @@ static int patch_conexant_auto(struct hda_codec *codec)
 	spec->capture_stream = &cx_auto_pcm_analog_capture;
 	codec->patch_ops = cx_auto_patch_ops;
 	if (spec->beep_amp)
-		snd_hda_attach_beep_device(codec, spec->beep_amp);
+		snd_hda_attach_beep_device(codec, get_amp_nid_(spec->beep_amp));
 
 	/* Some laptops with Conexant chips show stalls in S3 resume,
 	 * which falls into the single-cmd mode.
@@ -4603,6 +4600,14 @@ static const struct hda_codec_preset snd_hda_preset_conexant[] = {
 	  .patch = patch_conexant_auto },
 	{ .id = 0x14f15111, .name = "CX20753/4",
 	  .patch = patch_conexant_auto },
+	{ .id = 0x14f15113, .name = "CX20755",
+	  .patch = patch_conexant_auto },
+	{ .id = 0x14f15114, .name = "CX20756",
+	  .patch = patch_conexant_auto },
+	{ .id = 0x14f15115, .name = "CX20757",
+	  .patch = patch_conexant_auto },
+	{ .id = 0x14f151d7, .name = "CX20952",
+	  .patch = patch_conexant_auto },
 	{} /* terminator */
 };
 
@@ -4626,6 +4631,10 @@ MODULE_ALIAS("snd-hda-codec-id:14f150b9");
 MODULE_ALIAS("snd-hda-codec-id:14f1510f");
 MODULE_ALIAS("snd-hda-codec-id:14f15110");
 MODULE_ALIAS("snd-hda-codec-id:14f15111");
+MODULE_ALIAS("snd-hda-codec-id:14f15113");
+MODULE_ALIAS("snd-hda-codec-id:14f15114");
+MODULE_ALIAS("snd-hda-codec-id:14f15115");
+MODULE_ALIAS("snd-hda-codec-id:14f151d7");
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Conexant HD-audio codec");

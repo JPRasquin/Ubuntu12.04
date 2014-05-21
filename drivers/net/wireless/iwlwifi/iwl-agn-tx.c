@@ -443,27 +443,19 @@ int iwlagn_tx_skb(struct iwl_priv *priv, struct sk_buff *skb)
 	/* Copy MAC header from skb into command buffer */
 	memcpy(tx_cmd->hdr, hdr, hdr_len);
 
+	txq_id = info->hw_queue;
+
 	if (is_agg)
 		txq_id = priv->tid_data[sta_id][tid].agg.txq_id;
 	else if (info->flags & IEEE80211_TX_CTL_SEND_AFTER_DTIM) {
-		/*
-		 * Send this frame after DTIM -- there's a special queue
-		 * reserved for this for contexts that support AP mode.
-		 */
-		txq_id = ctx->mcast_queue;
-
 		/*
 		 * The microcode will clear the more data
 		 * bit in the last frame it transmits.
 		 */
 		hdr->frame_control |=
 			cpu_to_le16(IEEE80211_FCTL_MOREDATA);
-	} else if (info->flags & IEEE80211_TX_CTL_TX_OFFCHAN)
-		txq_id = IWL_AUX_QUEUE;
-	else
-		txq_id = ctx->ac_to_queue[skb_get_queue_mapping(skb)];
+	}
 
-	WARN_ON_ONCE(!is_agg && txq_id != info->hw_queue);
 	WARN_ON_ONCE(is_agg &&
 		     priv->queue_to_mac80211[txq_id] != info->hw_queue);
 
@@ -1094,29 +1086,6 @@ static void iwl_check_abort_status(struct iwl_priv *priv,
 	}
 }
 
-static int iwl_reclaim(struct iwl_priv *priv, int sta_id, int tid,
-		       int txq_id, int ssn, struct sk_buff_head *skbs)
-{
-	if (unlikely(txq_id >= IWLAGN_FIRST_AMPDU_QUEUE &&
-		     tid != IWL_TID_NON_QOS &&
-		     txq_id != priv->tid_data[sta_id][tid].agg.txq_id)) {
-		/*
-		 * FIXME: this is a uCode bug which need to be addressed,
-		 * log the information and return for now.
-		 * Since it is can possibly happen very often and in order
-		 * not to fill the syslog, don't use IWL_ERR or IWL_WARN
-		 */
-		IWL_DEBUG_TX_QUEUES(priv,
-			"Bad queue mapping txq_id=%d, agg_txq[sta:%d,tid:%d]=%d\n",
-			txq_id, sta_id, tid,
-			priv->tid_data[sta_id][tid].agg.txq_id);
-		return 1;
-	}
-
-	iwl_trans_reclaim(priv->trans, txq_id, ssn, skbs);
-	return 0;
-}
-
 int iwlagn_rx_reply_tx(struct iwl_priv *priv, struct iwl_rx_cmd_buffer *rxb,
 			       struct iwl_device_cmd *cmd)
 {
@@ -1175,8 +1144,8 @@ int iwlagn_rx_reply_tx(struct iwl_priv *priv, struct iwl_rx_cmd_buffer *rxb,
 						  next_reclaimed);
 		}
 
-		/*we can free until ssn % q.n_bd not inclusive */
-		WARN_ON(iwl_reclaim(priv, sta_id, tid, txq_id, ssn, &skbs));
+		iwl_trans_reclaim(priv->trans, txq_id, ssn, &skbs);
+
 		iwlagn_check_ratid_empty(priv, sta_id, tid);
 		freed = 0;
 
@@ -1289,16 +1258,27 @@ int iwlagn_rx_reply_compressed_ba(struct iwl_priv *priv,
 		return 0;
 	}
 
+	if (unlikely(scd_flow != agg->txq_id)) {
+		/*
+		 * FIXME: this is a uCode bug which need to be addressed,
+		 * log the information and return for now.
+		 * Since it is can possibly happen very often and in order
+		 * not to fill the syslog, don't use IWL_ERR or IWL_WARN
+		 */
+		IWL_DEBUG_TX_QUEUES(priv,
+				    "Bad queue mapping txq_id=%d, agg_txq[sta:%d,tid:%d]=%d\n",
+				    scd_flow, sta_id, tid, agg->txq_id);
+		spin_unlock(&priv->sta_lock);
+		return 0;
+	}
+
 	__skb_queue_head_init(&reclaimed_skbs);
 
 	/* Release all TFDs before the SSN, i.e. all TFDs in front of
 	 * block-ack window (we assume that they've been successfully
 	 * transmitted ... if not, it's too late anyway). */
-	if (iwl_reclaim(priv, sta_id, tid, scd_flow,
-			ba_resp_scd_ssn, &reclaimed_skbs)) {
-		spin_unlock(&priv->sta_lock);
-		return 0;
-	}
+	iwl_trans_reclaim(priv->trans, scd_flow, ba_resp_scd_ssn,
+			  &reclaimed_skbs);
 
 	IWL_DEBUG_TX_REPLY(priv, "REPLY_COMPRESSED_BA [%d] Received from %pM, "
 			   "sta_id = %d\n",

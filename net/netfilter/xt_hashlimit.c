@@ -307,18 +307,24 @@ static void htable_gc(unsigned long htlong)
 	add_timer(&ht->timer);
 }
 
-static void htable_destroy(struct xt_hashlimit_htable *hinfo)
+static void htable_remove_proc_entry(struct xt_hashlimit_htable *hinfo)
 {
 	struct hashlimit_net *hashlimit_net = hashlimit_pernet(hinfo->net);
 	struct proc_dir_entry *parent;
-
-	del_timer_sync(&hinfo->timer);
 
 	if (hinfo->family == NFPROTO_IPV4)
 		parent = hashlimit_net->ipt_hashlimit;
 	else
 		parent = hashlimit_net->ip6t_hashlimit;
-	remove_proc_entry(hinfo->pde->name, parent);
+
+	if (parent != NULL)
+		remove_proc_entry(hinfo->pde->name, parent);
+}
+
+static void htable_destroy(struct xt_hashlimit_htable *hinfo)
+{
+	del_timer_sync(&hinfo->timer);
+	htable_remove_proc_entry(hinfo);
 	htable_selective_cleanup(hinfo, select_all);
 	vfree(hinfo);
 }
@@ -856,6 +862,23 @@ static int __net_init hashlimit_proc_net_init(struct net *net)
 
 static void __net_exit hashlimit_proc_net_exit(struct net *net)
 {
+	struct xt_hashlimit_htable *hinfo;
+	struct hlist_node *pos;
+	struct hashlimit_net *hashlimit_net = hashlimit_pernet(net);
+
+	/* hashlimit_net_exit() is called before hashlimit_mt_destroy().
+	 * Make sure that the parent ipt_hashlimit and ip6t_hashlimit proc
+	 * entries is empty before trying to remove it.
+	 */
+	mutex_lock(&hashlimit_mutex);
+
+	hlist_for_each_entry(hinfo, pos, &hashlimit_net->htables, node)
+
+		htable_remove_proc_entry(hinfo);
+	hashlimit_net->ipt_hashlimit = NULL;
+	hashlimit_net->ip6t_hashlimit = NULL;
+	mutex_unlock(&hashlimit_mutex);
+
 	proc_net_remove(net, "ipt_hashlimit");
 #if IS_ENABLED(CONFIG_IP6_NF_IPTABLES)
 	proc_net_remove(net, "ip6t_hashlimit");
@@ -872,9 +895,6 @@ static int __net_init hashlimit_net_init(struct net *net)
 
 static void __net_exit hashlimit_net_exit(struct net *net)
 {
-	struct hashlimit_net *hashlimit_net = hashlimit_pernet(net);
-
-	BUG_ON(!hlist_empty(&hashlimit_net->htables));
 	hashlimit_proc_net_exit(net);
 }
 

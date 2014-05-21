@@ -76,7 +76,7 @@ EXPORT_SYMBOL_GPL(e820_any_mapped);
  * Note: this function only works correct if the e820 table is sorted and
  * not-overlapping, which is the case
  */
-int __init e820_all_mapped(u64 start, u64 end, unsigned type)
+int e820_all_mapped(u64 start, u64 end, unsigned type)
 {
 	int i;
 
@@ -103,6 +103,7 @@ int __init e820_all_mapped(u64 start, u64 end, unsigned type)
 	}
 	return 0;
 }
+EXPORT_SYMBOL_GPL(e820_all_mapped);
 
 /*
  * Add a memory region to the kernel e820 map.
@@ -1076,6 +1077,9 @@ void __init memblock_x86_fill(void)
 
 		memblock_add(ei->addr, ei->size);
 	}
+
+	/* throw away partial pages */
+	memblock_trim_memory(PAGE_SIZE);
 
 	memblock_dump_all();
 }
