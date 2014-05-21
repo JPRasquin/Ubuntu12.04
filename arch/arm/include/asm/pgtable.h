@@ -336,6 +336,7 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
  * We provide our own arch_get_unmapped_area to cope with VIPT caches.
  */
 #define HAVE_ARCH_UNMAPPED_AREA
+#define HAVE_ARCH_UNMAPPED_AREA_TOPDOWN
 
 /*
  * remap a physical page `pfn' of size `size' with page protection `prot'
@@ -345,9 +346,6 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 		remap_pfn_range(vma, from, pfn, size, prot)
 
 #define pgtable_cache_init() do { } while (0)
-
-void identity_mapping_add(pgd_t *, unsigned long, unsigned long);
-void identity_mapping_del(pgd_t *, unsigned long, unsigned long);
 
 #endif /* !__ASSEMBLY__ */
 

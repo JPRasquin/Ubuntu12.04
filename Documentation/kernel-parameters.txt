@@ -252,12 +252,15 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			For broken nForce2 BIOS resulting in XT-PIC timer.
 
 	acpi_sleep=	[HW,ACPI] Sleep options
-			Format: { s3_bios, s3_mode, s3_beep, s4_nohwsig,
+			Format: { s3_bios, s3_mode, s3_beep, s3_leds, s4_nohwsig,
 				  old_ordering, nonvs, sci_force_enable }
 			See Documentation/power/video.txt for information on
 			s3_bios and s3_mode.
 			s3_beep is for debugging; it makes the PC's speaker beep
 			as soon as the kernel's real-mode entry point is called.
+			s3_leds is for debugging; it flashes the keyboard LEDs
+			3 times as soon as the kernel's real-mode entry point is
+			called.
 			s4_nohwsig prevents ACPI hardware signature from being
 			used during resume from hibernation.
 			old_ordering causes the ACPI 1.0 ordering of the _PTS
@@ -688,6 +691,21 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			pass the driver to filter for as the parameter.
 			The filter can be disabled or changed to another
 			driver later using sysfs.
+
+	drm_kms_helper.edid_firmware=[<connector>:]<file>
+			Broken monitors, graphic adapters and KVMs may
+			send no or incorrect EDID data sets. This parameter
+			allows to specify an EDID data set in the
+			/lib/firmware directory that is used instead.
+			Generic built-in EDID data sets are used, if one of
+			edid/1024x768.bin, edid/1280x1024.bin,
+			edid/1680x1050.bin, or edid/1920x1080.bin is given
+			and no file with the same name exists. Details and
+			instructions how to build your own EDID data are
+			available in Documentation/EDID/HOWTO.txt. An EDID
+			data set will only be used for a particular connector,
+			if its name and a colon are prepended to the EDID
+			name.
 
 	dscc4.setup=	[NET]
 
@@ -2168,6 +2186,12 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			you might want to try "ulimit -i unlimited".
 
 			default: off.
+
+	printk.always_kmsg_dump=
+			Trigger kmsg_dump for cases other than kernel oops or
+			panics
+			Format: <bool>  (1/Y/y=enable, 0/N/n=disable)
+			default: disabled
 
 	printk.time=	Show timing data prefixed to each printk message line
 			Format: <bool>  (1/Y/y=enable, 0/N/n=disable)
