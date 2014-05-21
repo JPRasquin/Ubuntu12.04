@@ -262,20 +262,22 @@ static inline void squash_the_stupid_serial_number(struct cpuinfo_x86 *c)
 static int disable_smep __cpuinitdata;
 static __init int setup_disable_smep(char *arg)
 {
-	disable_smep = 1;
+// RAS - disable clearing SMEP bit
+//	disable_smep = 1;
 	return 1;
 }
 __setup("nosmep", setup_disable_smep);
 
 static __cpuinit void setup_smep(struct cpuinfo_x86 *c)
 {
-	if (cpu_has(c, X86_FEATURE_SMEP)) {
-		if (unlikely(disable_smep)) {
-			setup_clear_cpu_cap(X86_FEATURE_SMEP);
-			clear_in_cr4(X86_CR4_SMEP);
-		} else
-			set_in_cr4(X86_CR4_SMEP);
-	}
+// RAS - disable clearing SMEP bit
+//	if (cpu_has(c, X86_FEATURE_SMEP)) {
+//		if (unlikely(disable_smep)) {
+//			setup_clear_cpu_cap(X86_FEATURE_SMEP);
+//			clear_in_cr4(X86_CR4_SMEP);
+//		} else
+//			set_in_cr4(X86_CR4_SMEP);
+//	}
 }
 
 /*
